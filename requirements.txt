@@ -1,8 +1,10 @@
-Flask
-yt-dlp
-Flask-Cors
-Flask-Limiter
-requests
-gunicorn
-python-dotenv
+fastapi
+uvicorn[standard]
 redis
+yt-dlp
+httpx
+prometheus-fastapi-instrumentator
+slowapi
+python-dotenv
+pydantic
+aiofiles
