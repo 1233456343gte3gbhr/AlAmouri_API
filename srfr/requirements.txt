@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+redis
+yt-dlp
+httpx
+prometheus-fastapi-instrumentator
+slowapi
+python-dotenv
+pydantic
+aiofiles
