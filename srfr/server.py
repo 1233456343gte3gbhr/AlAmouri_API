@@ -1,10 +1,5 @@
 # ============================================================================
-# 🚀 السيرفر الاحترافي (FastAPI + Async + Queue + Redis + Anti-Abuse)
-# المتطلبات قبل التشغيل (قم بتثبيتها عبر الـ CMD):
-# pip install fastapi uvicorn redis yt-dlp httpx prometheus-fastapi-instrumentator slowapi python-dotenv pydantic aiofiles
-#
-# أمر التشغيل للإنتاج:
-# uvicorn main:app --host 0.0.0.0 --port 5000 --workers 4
+# 🚀 السيرفر الاحترافي (FastAPI + Async + Queue + Memory Cache + Anti-Abuse)
 # ============================================================================
 
 import os
@@ -21,7 +16,6 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, Depends, H
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import redis.asyncio as redis
 import yt_dlp
 import httpx
 
@@ -35,7 +29,6 @@ from prometheus_fastapi_instrumentator import Instrumentator
 # ----------------------------------------------------------------------------
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "AlAmouri_Pro_123456")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # إعداد الـ Logging
 logging.basicConfig(
@@ -63,8 +56,30 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # إعداد Prometheus للمراقبة (Grafana)
 Instrumentator().instrument(app).expose(app)
 
-# الاتصال بـ Redis (Async)
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+# ----------------------------------------------------------------------------
+# ⚡ بديل Redis (نظام كاش يعتمد على الذاكرة ليعمل مجاناً على Render)
+# ----------------------------------------------------------------------------
+class MemoryCache:
+    def __init__(self):
+        self.store = {}
+    
+    async def get(self, key):
+        return self.store.get(key)
+        
+    async def set(self, key, value, ex=None):
+        self.store[key] = str(value)
+        
+    async def incr(self, key):
+        self.store[key] = str(int(self.store.get(key, "0")) + 1)
+        return int(self.store[key])
+        
+    async def expire(self, key, time):
+        pass 
+        
+    async def ping(self):
+        return True
+
+redis_client = MemoryCache()
 
 # ----------------------------------------------------------------------------
 # 2. وظائف الحماية والذكاء (Security, Anti-Abuse & Detection)
@@ -74,26 +89,19 @@ def detect_platform(url: str):
     """التعرف التلقائي على المنصة وتحديد مدة الكاش (TTL) بناءً عليها"""
     url_lower = url.lower()
     if "tiktok.com" in url_lower or "tiktokv.com" in url_lower:
-        return "tiktok", 3600  # 1 ساعة (روابط تيك توك تتغير بسرعة)
+        return "tiktok", 3600  # 1 ساعة
     elif "youtube.com" in url_lower or "youtu.be" in url_lower:
-        return "youtube", 86400  # 24 ساعة (يوتيوب مستقر)
+        return "youtube", 86400  # 24 ساعة
     elif "facebook.com" in url_lower or "fb.watch" in url_lower:
-        return "facebook", 7200  # ساعتين (فيسبوك)
+        return "facebook", 7200  # ساعتين
     elif "instagram.com" in url_lower:
-        return "instagram", 7200  # ساعتين (انستغرام)
-    return "unknown", 600  # افتراضي 10 دقائق للبقية
+        return "instagram", 7200  # ساعتين
+    return "unknown", 600  # افتراضي 10 دقائق
 
 async def anti_abuse_middleware(request: Request, call_next):
-    """
-    نظام Anti-Abuse قوي:
-    يقوم بحظر الـ IP لمدة ساعة إذا حاول تجاوز الـ API Key بشكل متكرر
-    ويقوم بإنشاء سجل إحصائيات للمراقبة
-    """
+    """نظام Anti-Abuse قوي يعتمد على الذاكرة المؤقتة"""
     client_ip = request.client.host
     path = request.url.path
-
-    if not redis_client:
-        return await call_next(request)
 
     # التحقق من أن الآي بي محظور مسبقاً
     is_banned = await redis_client.get(f"ban_ip:{client_ip}")
@@ -106,10 +114,9 @@ async def anti_abuse_middleware(request: Request, call_next):
         if api_key_header != API_KEY:
             # تسجيل محاولة فاشلة
             failed_attempts = await redis_client.incr(f"abuse:{client_ip}")
-            await redis_client.expire(f"abuse:{client_ip}", 600)  # تنتهي المحاولات بعد 10 دقائق
+            await redis_client.expire(f"abuse:{client_ip}", 600)
             
             if failed_attempts >= 5:
-                # حظر الـ IP لمدة ساعة بعد 5 محاولات فاشلة
                 await redis_client.set(f"ban_ip:{client_ip}", "banned", ex=3600)
                 logger.warning(f"🚨 تم حظر IP: {client_ip} لمدة ساعة بسبب 5 محاولات غير مصرح بها.")
                 return JSONResponse(status_code=403, content={"error": "IP Address Banned for 1 hour."})
@@ -118,7 +125,6 @@ async def anti_abuse_middleware(request: Request, call_next):
     # إحصائيات عامة
     response = await call_next(request)
     
-    # زيادة عداد الطلبات الناجحة للمراقبة (Stats endpoint)
     if response.status_code == 200:
         await redis_client.incr("stats:total_requests")
     return response
@@ -130,7 +136,7 @@ app.middleware("http")(anti_abuse_middleware)
 # ----------------------------------------------------------------------------
 
 async def yt_dlp_auto_updater():
-    """تحديث yt-dlp في الخلفية بدون حجب الاستجابات للمستخدمين (Async)"""
+    """تحديث yt-dlp في الخلفية"""
     while True:
         try:
             logger.info("جاري فحص وتحديث yt-dlp في الخلفية ♻️...")
@@ -146,7 +152,7 @@ async def yt_dlp_auto_updater():
                 logger.error(f"فشل التحديث: {stderr.decode()}")
         except Exception as e:
             logger.error(f"خطأ أثناء تحديث yt-dlp: {e}")
-        await asyncio.sleep(86400)  # يكرر كل 24 ساعة
+        await asyncio.sleep(86400)
 
 @app.on_event("startup")
 async def startup_event():
@@ -165,20 +171,16 @@ class VideoRequest(BaseModel):
 
 @app.get("/api/health")
 async def health_check():
-    """حالة السيرفر للتحقق من كفاءته"""
-    redis_status = await redis_client.ping() if redis_client else False
+    """حالة السيرفر"""
     return {
         "status": "Healthy 🚀",
-        "redis_connected": redis_status,
+        "cache_system": "Memory",
         "uptime_info": "See Prometheus /metrics endpoint"
     }
 
 @app.get("/api/stats")
 async def get_stats():
-    """إحصائيات السيرفر وطلبات التحميل"""
-    if not redis_client:
-        return {"error": "Redis Not Available"}
-    
+    """إحصائيات السيرفر"""
     total_req = await redis_client.get("stats:total_requests") or "0"
     total_dl = await redis_client.get("stats:total_downloads") or "0"
     total_extracts = await redis_client.get("stats:total_extracts") or "0"
@@ -197,14 +199,12 @@ async def get_stats():
 # ----------------------------------------------------------------------------
 
 def extract_video_info(url: str):
-    """
-    الدالة الثقيلة التي تستخدم yt-dlp، مجهزة للعمل داخل خيط منفصل لتفادي حظر (Blocking) سيرفر FastAPI.
-    """
+    """الدالة الثقيلة التي تستخدم yt-dlp"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'skip_download': True,
-        'socket_timeout': 15, # تقليل وقت الانتظار الطويل
+        'socket_timeout': 15,
         'extractor_args': {'tiktok': ['api_hostname=api22-normal-c-alisg.tiktokv.com']},
     }
     
@@ -213,11 +213,10 @@ def extract_video_info(url: str):
         return info
 
 async def process_queue_worker(job_id: str, url: str):
-    """عامل الخلفية لمعالجة الرابط وحفظ النتيجة في Redis"""
+    """عامل الخلفية لمعالجة الرابط"""
     try:
         await redis_client.set(f"job:{job_id}:status", "processing")
         
-        # تنفيذ الاستخراج في Thread منفصل للحفاظ على الـ Asynchronous
         info = await asyncio.to_thread(extract_video_info, url)
         
         if not info:
@@ -227,7 +226,6 @@ async def process_queue_worker(job_id: str, url: str):
         if duration > 7200:
             raise Exception("الفيديو طويل جداً، الحد الأقصى ساعتين")
 
-        # تنسيق البيانات
         title = info.get('title', 'Unknown Video')
         thumbnail = info.get('thumbnail', '')
         uploader = info.get('uploader', 'Unknown')
@@ -251,10 +249,8 @@ async def process_queue_worker(job_id: str, url: str):
         if not unique_videos and not audios:
             raise Exception("لم يتم العثور على وسائط قابلة للتحميل")
 
-        # إعداد توكن محمي بالـ IP
         download_token = str(uuid.uuid4())
         
-        # حفظ النتيجة في Redis
         result_data = {
             "title": title,
             "thumbnail": thumbnail,
@@ -265,20 +261,12 @@ async def process_queue_worker(job_id: str, url: str):
             "download_token": download_token,
         }
         
-        # تحديد TTL بناءً على المنصة
         platform, cache_ttl = detect_platform(url)
         
-        # حفظ التوكن (مرتبط بالرابط) لمدة ساعة
         await redis_client.set(f"dl_token:{download_token}", url, ex=3600)
-        
-        # حفظ نتيجة الجوب كـ Completed
         await redis_client.set(f"job:{job_id}:status", "completed", ex=cache_ttl)
         await redis_client.set(f"job:{job_id}:data", json.dumps(result_data), ex=cache_ttl)
-        
-        # حفظ كاش عام للرابط لتقليل الطلبات المستقبلية
         await redis_client.set(f"video_cache:{url}", json.dumps(result_data), ex=cache_ttl)
-
-        # تحديث الإحصائيات
         await redis_client.incr("stats:total_extracts")
 
     except Exception as e:
@@ -290,11 +278,6 @@ async def process_queue_worker(job_id: str, url: str):
 @app.get("/api/extract")
 @limiter.limit("15/minute")
 async def extract_api(request: Request, bg_tasks: BackgroundTasks, url: str = None):
-    """
-    نقطة النهاية الحديثة بنظام Queue (الطابور).
-    تُرجع job_id فوراً ليقوم العميل (Flutter) بتتبعه عبر Progress API.
-    """
-    # يدعم الـ GET والـ POST
     if request.method == 'POST':
         body = await request.json()
         url = body.get('url', url)
@@ -302,31 +285,24 @@ async def extract_api(request: Request, bg_tasks: BackgroundTasks, url: str = No
     if not url or not url.startswith("http"):
         return JSONResponse({"success": False, "error": "رابط غير صالح"}, status_code=400)
 
-    # 1. فلترة وتحديد المنصة الذكي
     platform, _ = detect_platform(url)
     if platform == "unknown" and ("vimeo" not in url and "twitter" not in url):
-        logger.warning(f"مرفوض: تم محاولة إدخال منصة غير مدعومة: {url}")
-        # يمكن فتح الحظر لاحقاً، لكن هذه إضافة للحماية
         pass 
 
-    # 2. الكاش الذكي: إذا كان الرابط موجود مسبقاً، نرجعه فوراً كـ completed job
     cache_key = f"video_cache:{url}"
     cached_data = await redis_client.get(cache_key)
     if cached_data:
         return {"success": True, "job_id": "cached", "status": "completed", "data": json.loads(cached_data)}
 
-    # 3. إنشاء وظيفة جديدة
     job_id = str(uuid.uuid4())
     await redis_client.set(f"job:{job_id}:status", "pending", ex=600)
     
-    # 4. إضافة للمعالجة في الخلفية
     bg_tasks.add_task(process_queue_worker, job_id, url)
     
     return {"success": True, "job_id": job_id, "status": "pending", "message": "تم إضافة الرابط في قائمة المعالجة"}
 
 @app.get("/api/progress")
 async def check_progress(job_id: str):
-    """Progress API: لتتبع حالة استخراج الروابط (Pending -> Processing -> Completed/Failed)"""
     if job_id == "cached":
         return {"success": False, "error": "استخدم البيانات المعادة مباشرة"}
         
@@ -344,40 +320,27 @@ async def check_progress(job_id: str):
         return {"success": True, "status": status}
 
 # ----------------------------------------------------------------------------
-# 7. نقطة التحميل مع دعم الـ (Resume/Range) والـ (Single-Use Token per IP)
+# 7. نقطة التحميل
 # ----------------------------------------------------------------------------
 
 @app.get("/api/download")
 @limiter.limit("5/minute")
 async def download_secure(request: Request, token: str, range: Optional[str] = Header(None)):
-    """
-    نقطة تحميل آمنة جداً تدعم:
-    1. Single-use (محدود بـ IP).
-    2. استكمال التحميل (Resume Download Support) عبر HTTP Range requests.
-    3. البث المباشر (Streaming Response) لتفادي استهلاك سيرفر الـ RAM/Disk.
-    """
     client_ip = request.client.host
 
-    # 1. التحقق من التوكن (ربط التوكن بالـ IP)
     url = await redis_client.get(f"dl_token:{token}")
     if not url:
         return JSONResponse({"success": False, "error": "التوكن غير صالح أو منتهي الصلاحية"}, status_code=403)
 
-    # التحقق من IP (نخزن الآي بي الأصلي في التوكن بمجرد الاستخدام الأول لضمان Resume لنفس الآي بي فقط)
     ip_binder_key = f"dl_token_ip:{token}"
     bound_ip = await redis_client.get(ip_binder_key)
     
     if not bound_ip:
-        # الاستخدام الأول: نربط التوكن بالآي بي هذا لتفادي السرقة
         await redis_client.set(ip_binder_key, client_ip, ex=3600)
     elif bound_ip != client_ip:
-        # إذا تم محاولة استخدام التوكن من شبكة أخرى (مسروق)
         logger.warning(f"🚨 محاولة سرقة توكن! توكن: {token} مسجل لـ {bound_ip} ومطلوب من {client_ip}")
         return JSONResponse({"success": False, "error": "عذراً، لا يمكن استكمال التحميل من شبكة إنترنت مختلفة"}, status_code=403)
 
-    logger.info(f"طلب تحميل آمن للرابط عبر التوكن (IP: {client_ip}) - Range: {range}")
-
-    # استخراج الرابط المباشر للملف الفعلي عبر yt-dlp
     ydl_opts = {
         'format': 'best',
         'quiet': True,
@@ -386,7 +349,6 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
     }
 
     try:
-        # نستخدم to_thread لتفادي إيقاف السيرفر
         info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
         video_url = info.get('url')
         title = info.get('title', 'video').replace('/', '_').replace('\\', '_')
@@ -394,21 +356,16 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
         if not video_url:
             raise HTTPException(status_code=404, detail="لم يتم العثور على رابط التحميل المباشر")
 
-        # تجهيز الترويسات لدعم الـ Resume (Range requests)
         headers = {}
         if range:
             headers['Range'] = range
             
-        # الاتصال بالسيرفر المصدر بشكل غير متزامن (Async) ودعم الـ Stream
-        # نستعمل timeout طويل نسبياً للـ stream
         client = httpx.AsyncClient(timeout=30.0)
         req = await client.get(video_url, headers=headers)
         
-        # التحقق من حجم الملف
-        max_size_bytes = 200 * 1024 * 1024  # 200 ميجا
+        max_size_bytes = 200 * 1024 * 1024 
         content_length = int(req.headers.get('Content-Length', 0))
         
-        # إذا كان طلب Range، الحجم الإجمالي يكون في Content-Range
         total_size = content_length
         content_range = req.headers.get('Content-Range')
         if content_range:
@@ -420,7 +377,6 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
             await req.aclose()
             return JSONResponse({"success": False, "error": "حجم الملف يتجاوز الحد المسموح به (200MB)"}, status_code=400)
 
-        # الترويسات التي سنرسلها لتطبيق الموبايل
         response_headers = {
             'Content-Disposition': f'attachment; filename="{title}.mp4"',
             'Content-Type': req.headers.get('Content-Type', 'video/mp4'),
@@ -432,13 +388,11 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
         if 'Content-Length' in req.headers:
             response_headers['Content-Length'] = req.headers['Content-Length']
 
-        # زيادة الإحصائيات (نجاح التحميل)
-        if not range:  # نحسب التحميلة مرة واحدة وليست مع كل Range chunk
+        if not range: 
             await redis_client.incr("stats:total_downloads")
 
-        # بث الاستجابة لتطبيق الموبايل بشكل متزامن وبدعم كامل للاستكمال
         async def stream_generator():
-            async for chunk in req.aiter_bytes(chunk_size=1024*1024):  # 1MB Chunks
+            async for chunk in req.aiter_bytes(chunk_size=1024*1024): 
                 if chunk:
                     yield chunk
             await req.aclose()
@@ -459,7 +413,6 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
 
 # ============================================================================
 # دالة التوافقية للمسار القديم (/get_video) في تطبيق الفلاتر
-# (تقوم بالاستخراج المباشر بدون Queue إذا كان التطبيق يستخدم الطريقة القديمة)
 # ============================================================================
 @app.get("/get_video")
 @limiter.limit("15/minute")
