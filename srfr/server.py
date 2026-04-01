@@ -1,5 +1,6 @@
 # ============================================================================
 # 🚀 السيرفر الاحترافي (FastAPI + Async + Queue + Memory Cache + Anti-Abuse)
+# تم التحديث: تخطي حمايات تيك توك، انستقرام، يوتيوب، فيسبوك ومنع الملفات المعطوبة
 # ============================================================================
 
 import os
@@ -30,7 +31,6 @@ from prometheus_fastapi_instrumentator import Instrumentator
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "AlAmouri_Pro_123456")
 
-# إعداد الـ Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -39,7 +39,6 @@ logger = logging.getLogger("AlAmouriServer")
 
 app = FastAPI(title="AlAmouri Pro API", version="2.0.0", description="Advanced Video Downloader API")
 
-# إعداد CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,16 +47,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# إعداد Rate Limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# إعداد Prometheus للمراقبة (Grafana)
 Instrumentator().instrument(app).expose(app)
 
 # ----------------------------------------------------------------------------
-# ⚡ بديل Redis (نظام كاش يعتمد على الذاكرة ليعمل مجاناً على Render)
+# ⚡ بديل Redis (نظام كاش يعتمد على الذاكرة)
 # ----------------------------------------------------------------------------
 class MemoryCache:
     def __init__(self):
@@ -86,33 +83,28 @@ redis_client = MemoryCache()
 # ----------------------------------------------------------------------------
 
 def detect_platform(url: str):
-    """التعرف التلقائي على المنصة وتحديد مدة الكاش (TTL) بناءً عليها"""
     url_lower = url.lower()
     if "tiktok.com" in url_lower or "tiktokv.com" in url_lower:
-        return "tiktok", 3600  # 1 ساعة
+        return "tiktok", 3600  
     elif "youtube.com" in url_lower or "youtu.be" in url_lower:
-        return "youtube", 86400  # 24 ساعة
+        return "youtube", 86400  
     elif "facebook.com" in url_lower or "fb.watch" in url_lower:
-        return "facebook", 7200  # ساعتين
+        return "facebook", 7200  
     elif "instagram.com" in url_lower:
-        return "instagram", 7200  # ساعتين
-    return "unknown", 600  # افتراضي 10 دقائق
+        return "instagram", 7200  
+    return "unknown", 600  
 
 async def anti_abuse_middleware(request: Request, call_next):
-    """نظام Anti-Abuse قوي يعتمد على الذاكرة المؤقتة"""
     client_ip = request.client.host
     path = request.url.path
 
-    # التحقق من أن الآي بي محظور مسبقاً
     is_banned = await redis_client.get(f"ban_ip:{client_ip}")
     if is_banned:
         return JSONResponse(status_code=403, content={"error": "IP Address Banned. محظور بسبب نشاط مشبوه."})
 
-    # التحقق من الـ API Key في المسارات التي تحتاج حماية
     if path.startswith("/api/") and not path.startswith("/api/download") and not path.startswith("/api/health"):
         api_key_header = request.headers.get("X-API-KEY")
         if api_key_header != API_KEY:
-            # تسجيل محاولة فاشلة
             failed_attempts = await redis_client.incr(f"abuse:{client_ip}")
             await redis_client.expire(f"abuse:{client_ip}", 600)
             
@@ -122,7 +114,6 @@ async def anti_abuse_middleware(request: Request, call_next):
                 return JSONResponse(status_code=403, content={"error": "IP Address Banned for 1 hour."})
             return JSONResponse(status_code=401, content={"error": "Unauthorized Access"})
 
-    # إحصائيات عامة
     response = await call_next(request)
     
     if response.status_code == 200:
@@ -136,7 +127,6 @@ app.middleware("http")(anti_abuse_middleware)
 # ----------------------------------------------------------------------------
 
 async def yt_dlp_auto_updater():
-    """تحديث yt-dlp في الخلفية"""
     while True:
         try:
             logger.info("جاري فحص وتحديث yt-dlp في الخلفية ♻️...")
@@ -148,8 +138,6 @@ async def yt_dlp_auto_updater():
             stdout, stderr = await process.communicate()
             if process.returncode == 0:
                 logger.info("تم تحديث yt-dlp التلقائي بنجاح 🔥")
-            else:
-                logger.error(f"فشل التحديث: {stderr.decode()}")
         except Exception as e:
             logger.error(f"خطأ أثناء تحديث yt-dlp: {e}")
         await asyncio.sleep(86400)
@@ -158,20 +146,11 @@ async def yt_dlp_auto_updater():
 async def startup_event():
     asyncio.create_task(yt_dlp_auto_updater())
 
-# ----------------------------------------------------------------------------
-# 4. نماذج التحقق (Pydantic Models)
-# ----------------------------------------------------------------------------
-
 class VideoRequest(BaseModel):
     url: str
 
-# ----------------------------------------------------------------------------
-# 5. نقاط نهاية المراقبة (Health & Stats)
-# ----------------------------------------------------------------------------
-
 @app.get("/api/health")
 async def health_check():
-    """حالة السيرفر"""
     return {
         "status": "Healthy 🚀",
         "cache_system": "Memory",
@@ -180,7 +159,6 @@ async def health_check():
 
 @app.get("/api/stats")
 async def get_stats():
-    """إحصائيات السيرفر"""
     total_req = await redis_client.get("stats:total_requests") or "0"
     total_dl = await redis_client.get("stats:total_downloads") or "0"
     total_extracts = await redis_client.get("stats:total_extracts") or "0"
@@ -195,32 +173,45 @@ async def get_stats():
     }
 
 # ----------------------------------------------------------------------------
-# 6. نظام الانتظار والاستخراج الاحترافي (Queue System & Progress API)
+# 6. نظام الاستخراج المتقدم (Advanced Extraction)
 # ----------------------------------------------------------------------------
 
-def extract_video_info(url: str):
-    """الدالة الثقيلة التي تستخدم yt-dlp"""
-    ydl_opts = {
+def get_base_ydl_opts(is_download=False):
+    """إعدادات قوية لتخطي الحماية وجلب أعلى جودة بدون علامة مائية"""
+    return {
         'quiet': True,
         'no_warnings': True,
-        'skip_download': True,
-        'socket_timeout': 15,
-        'extractor_args': {'tiktok': ['api_hostname=api22-normal-c-alisg.tiktokv.com']},
+        'skip_download': not is_download,
+        'socket_timeout': 30,
+        'geo_bypass': True,
+        'nocheckcertificate': True,
+        # انتحال شخصية متصفح وتطبيق حقيقي لتفادي الحظر
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Sec-Fetch-Mode': 'navigate',
+        },
+        'extractor_args': {
+            # إجبار تيك توك على جلب الرابط من الـ API المخفي بدون علامة مائية
+            'tiktok': ['api_hostname=api16-normal-c-useast1a.tiktokv.com', 'app_info=7355_200.0.0'],
+            'youtube': ['skip=dash', 'player_client=android']
+        },
     }
-    
+
+def extract_video_info(url: str):
+    ydl_opts = get_base_ydl_opts(is_download=False)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return info
 
 async def process_queue_worker(job_id: str, url: str):
-    """عامل الخلفية لمعالجة الرابط"""
     try:
         await redis_client.set(f"job:{job_id}:status", "processing")
-        
         info = await asyncio.to_thread(extract_video_info, url)
         
         if not info:
-            raise Exception("No data returned")
+            raise Exception("لم يتم العثور على بيانات في هذا الرابط، قد يكون محمي جداً أو محذوف.")
 
         duration = info.get('duration', 0)
         if duration > 7200:
@@ -238,16 +229,27 @@ async def process_queue_worker(job_id: str, url: str):
             filesize = f.get('filesize') or f.get('filesize_approx') or 0
             filesize_mb = round(filesize / (1024 * 1024), 2) if filesize else "غير معروف"
 
+            # استخراج الفيديو بدون صوت (إذا تطلب الأمر دمج) أو فيديو كامل
             if f.get('vcodec') != 'none' and f.get('ext') == 'mp4' and f.get('url') and f.get('height'):
-                videos.append({'quality': f"{f.get('height')}p", 'height': f.get('height'), 'size_mb': filesize_mb, 'url': f.get('url')})
+                # تجاهل الروابط اللي تحتوي على m3u8 لأنها لا تحمل كملف مباشر بسهولة في الفلاتر
+                if "m3u8" not in f.get('url'):
+                    videos.append({'quality': f"{f.get('height')}p", 'height': f.get('height'), 'size_mb': filesize_mb, 'url': f.get('url')})
+            
+            # استخراج الصوت فقط
             if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url'):
-                audios.append({'format': f.get('ext'), 'size_mb': filesize_mb, 'url': f.get('url')})
+                if "m3u8" not in f.get('url'):
+                    audios.append({'format': f.get('ext'), 'size_mb': filesize_mb, 'url': f.get('url')})
 
+        # ترتيب واختيار الجودات الفريدة
         videos = sorted(videos, key=lambda k: k['height'], reverse=True)
         unique_videos = list({v['height']: v for v in videos}.values())
 
+        # إذا كانت القائمة فارغة بسبب التصفية، محاولة استخدام الرابط المباشر الافتراضي
+        if not unique_videos and info.get('url'):
+             unique_videos.append({'quality': 'Default', 'height': 0, 'size_mb': 'غير معروف', 'url': info.get('url')})
+
         if not unique_videos and not audios:
-            raise Exception("لم يتم العثور على وسائط قابلة للتحميل")
+            raise Exception("تعذر العثور على روابط تحميل مباشرة مسموحة لهذا المقطع.")
 
         download_token = str(uuid.uuid4())
         
@@ -276,7 +278,7 @@ async def process_queue_worker(job_id: str, url: str):
 
 @app.post("/api/extract")
 @app.get("/api/extract")
-@limiter.limit("15/minute")
+@limiter.limit("20/minute")
 async def extract_api(request: Request, bg_tasks: BackgroundTasks, url: str = None):
     if request.method == 'POST':
         body = await request.json()
@@ -284,10 +286,6 @@ async def extract_api(request: Request, bg_tasks: BackgroundTasks, url: str = No
         
     if not url or not url.startswith("http"):
         return JSONResponse({"success": False, "error": "رابط غير صالح"}, status_code=400)
-
-    platform, _ = detect_platform(url)
-    if platform == "unknown" and ("vimeo" not in url and "twitter" not in url):
-        pass 
 
     cache_key = f"video_cache:{url}"
     cached_data = await redis_client.get(cache_key)
@@ -320,17 +318,17 @@ async def check_progress(job_id: str):
         return {"success": True, "status": status}
 
 # ----------------------------------------------------------------------------
-# 7. نقطة التحميل
+# 7. نقطة التحميل مع الحماية من الملفات المعطوبة (Corrupted Files Preventer)
 # ----------------------------------------------------------------------------
 
 @app.get("/api/download")
-@limiter.limit("5/minute")
+@limiter.limit("10/minute")
 async def download_secure(request: Request, token: str, range: Optional[str] = Header(None)):
     client_ip = request.client.host
 
     url = await redis_client.get(f"dl_token:{token}")
     if not url:
-        return JSONResponse({"success": False, "error": "التوكن غير صالح أو منتهي الصلاحية"}, status_code=403)
+        return JSONResponse({"success": False, "error": "انتهت صلاحية جلسة التحميل، يرجى استخراج الرابط من جديد"}, status_code=403)
 
     ip_binder_key = f"dl_token_ip:{token}"
     bound_ip = await redis_client.get(ip_binder_key)
@@ -338,31 +336,36 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
     if not bound_ip:
         await redis_client.set(ip_binder_key, client_ip, ex=3600)
     elif bound_ip != client_ip:
-        logger.warning(f"🚨 محاولة سرقة توكن! توكن: {token} مسجل لـ {bound_ip} ومطلوب من {client_ip}")
-        return JSONResponse({"success": False, "error": "عذراً، لا يمكن استكمال التحميل من شبكة إنترنت مختلفة"}, status_code=403)
+        logger.warning(f"🚨 توكن مسروق! {token}")
+        return JSONResponse({"success": False, "error": "لا يمكن استكمال التحميل من شبكة إنترنت مختلفة"}, status_code=403)
 
-    ydl_opts = {
-        'format': 'best',
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {'tiktok': ['api_hostname=api22-normal-c-alisg.tiktokv.com']},
-    }
+    ydl_opts = get_base_ydl_opts(is_download=True)
+    ydl_opts['format'] = 'best' # إجبار سحب أفضل جودة للتحميل المباشر
 
     try:
+        # استخراج رابط التحميل النهائي
         info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
         video_url = info.get('url')
         title = info.get('title', 'video').replace('/', '_').replace('\\', '_')
         
         if not video_url:
-            raise HTTPException(status_code=404, detail="لم يتم العثور على رابط التحميل المباشر")
+            raise HTTPException(status_code=404, detail="عذراً، فشل السيرفر في توليد رابط التحميل النهائي.")
 
-        headers = {}
+        headers = {
+            'User-Agent': ydl_opts['http_headers']['User-Agent']
+        }
         if range:
             headers['Range'] = range
             
-        client = httpx.AsyncClient(timeout=30.0)
+        client = httpx.AsyncClient(timeout=45.0, follow_redirects=True)
         req = await client.get(video_url, headers=headers)
         
+        # 🔴 الحماية من الملفات المعطوبة: التأكد من أن السيرفر المصدر وافق على طلب التحميل
+        if req.status_code not in [200, 206]:
+            await req.aclose()
+            logger.error(f"Source server rejected stream: Status {req.status_code}")
+            return JSONResponse({"success": False, "error": "المصدر الأصلي (تيك توك/يوتيوب) رفض إرسال الملف، يرجى المحاولة لاحقاً."}, status_code=400)
+
         max_size_bytes = 200 * 1024 * 1024 
         content_length = int(req.headers.get('Content-Length', 0))
         
@@ -375,7 +378,7 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
             
         if total_size > max_size_bytes:
             await req.aclose()
-            return JSONResponse({"success": False, "error": "حجم الملف يتجاوز الحد المسموح به (200MB)"}, status_code=400)
+            return JSONResponse({"success": False, "error": "حجم الملف يتجاوز الحد المسموح به مجاناً (200MB)"}, status_code=400)
 
         response_headers = {
             'Content-Disposition': f'attachment; filename="{title}.mp4"',
@@ -392,10 +395,14 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
             await redis_client.incr("stats:total_downloads")
 
         async def stream_generator():
-            async for chunk in req.aiter_bytes(chunk_size=1024*1024): 
-                if chunk:
-                    yield chunk
-            await req.aclose()
+            try:
+                async for chunk in req.aiter_bytes(chunk_size=1024*1024): 
+                    if chunk:
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Stream interrupted: {e}")
+            finally:
+                await req.aclose()
 
         status_code = req.status_code if req.status_code in [200, 206] else 200
         return StreamingResponse(
@@ -405,14 +412,13 @@ async def download_secure(request: Request, token: str, range: Optional[str] = H
         )
 
     except httpx.TimeoutException:
-        logger.error("Timeout fetching final video url.")
-        return JSONResponse({"success": False, "error": "انتهى وقت الاتصال بالسيرفر المصدر"}, status_code=504)
+        return JSONResponse({"success": False, "error": "انتهى وقت الاتصال بالسيرفر المصدر (Timeout)"}, status_code=504)
     except Exception as e:
         logger.error(f"Download stream error: {e}")
-        return JSONResponse({"success": False, "error": f"حدث خطأ غير متوقع: {str(e)}"}, status_code=500)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 # ============================================================================
-# دالة التوافقية للمسار القديم (/get_video) في تطبيق الفلاتر
+# مسار التوافق القديم
 # ============================================================================
 @app.get("/get_video")
 @limiter.limit("15/minute")
@@ -428,6 +434,9 @@ async def get_video_legacy(request: Request, url: str = None):
     try:
         info = await asyncio.to_thread(extract_video_info, url)
         
+        if not info:
+            return JSONResponse({"success": False, "error": "المقطع محمي أو محذوف"}, status_code=404)
+
         duration = info.get('duration', 0)
         if duration > 7200:
              return JSONResponse({"success": False, "error": "الفيديو طويل جداً، الحد الأقصى ساعتين"}, status_code=400)
@@ -445,16 +454,22 @@ async def get_video_legacy(request: Request, url: str = None):
         for f in formats:
             filesize = f.get('filesize') or f.get('filesize_approx') or 0
             filesize_mb = round(filesize / (1024 * 1024), 2) if filesize else "غير معروف"
+            
             if f.get('vcodec') != 'none' and f.get('ext') == 'mp4' and f.get('url') and f.get('height'):
-                videos.append({'quality': f"{f.get('height')}p", 'height': f.get('height'), 'size_mb': filesize_mb, 'url': f.get('url')})
+                if "m3u8" not in f.get('url'):
+                    videos.append({'quality': f"{f.get('height')}p", 'height': f.get('height'), 'size_mb': filesize_mb, 'url': f.get('url')})
             if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url'):
-                audios.append({'format': f.get('ext'), 'size_mb': filesize_mb, 'url': f.get('url')})
-
-        if not videos and not audios:
-            return JSONResponse({"success": False, "error": "لم يتم العثور على وسائط قابلة للتحميل"}, status_code=404)
+                if "m3u8" not in f.get('url'):
+                    audios.append({'format': f.get('ext'), 'size_mb': filesize_mb, 'url': f.get('url')})
 
         videos = sorted(videos, key=lambda k: k['height'], reverse=True)
         unique_videos = list({v['height']: v for v in videos}.values())
+
+        if not unique_videos and info.get('url'):
+            unique_videos.append({'quality': 'Default', 'height': 0, 'size_mb': 'غير معروف', 'url': info.get('url')})
+
+        if not unique_videos and not audios:
+            return JSONResponse({"success": False, "error": "تم منع التحميل من قبل صاحب المقطع"}, status_code=404)
 
         result = {
             "success": True,
@@ -478,4 +493,4 @@ async def get_video_legacy(request: Request, url: str = None):
         
     except Exception as e:
         logger.error(f"Legacy Extraction Error: {e}")
-        return JSONResponse({"success": False, "error": "حدث خطأ أثناء معالجة الرابط، تأكد من صحته"}, status_code=500)
+        return JSONResponse({"success": False, "error": "حدث خطأ أثناء معالجة الرابط، قد يكون محمي."}, status_code=500)
