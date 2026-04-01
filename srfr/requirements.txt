@@ -5,3 +5,4 @@ httpx
 slowapi
 prometheus-fastapi-instrumentator
 python-dotenv
+pytubefix
