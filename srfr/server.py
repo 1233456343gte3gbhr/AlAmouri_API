@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import yt_dlp
 import httpx
-from pytubefix import YouTube
+import redis.asyncio as redis
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -25,7 +25,7 @@ API_KEY = os.getenv("API_KEY", "AlAmouri_Pro_123456")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("AlAmouriServer")
 
-app = FastAPI(title="AlAmouri Pro API", version="4.2.0")
+app = FastAPI(title="AlAmouri Pro API", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -36,17 +36,13 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 Instrumentator().instrument(app).expose(app)
 
-class MemoryCache:
-    def __init__(self): self.store = {}
-    async def get(self, key): return self.store.get(key)
-    async def set(self, key, value, ex=None): self.store[key] = str(value)
-    async def incr(self, key):
-        self.store[key] = str(int(self.store.get(key, "0")) + 1)
-        return int(self.store[key])
-    async def expire(self, key, time): pass 
-    async def ping(self): return True
+# ----------------------------------------------------------------------------
+# ⚡ إعداد Redis الحقيقي للاحترافية والسرعة
+# ----------------------------------------------------------------------------
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+redis_client = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 
-redis_client = MemoryCache()
+# ----------------------------------------------------------------------------
 
 def detect_platform(url: str):
     url_lower = url.lower()
@@ -61,11 +57,15 @@ async def anti_abuse_middleware(request: Request, call_next):
         if request.headers.get("X-API-KEY") != API_KEY:
             return JSONResponse(status_code=401, content={"error": "Unauthorized Access"})
     response = await call_next(request)
-    if response.status_code == 200: await redis_client.incr("stats:total_requests")
+    if response.status_code == 200: 
+        try:
+            await redis_client.incr("stats:total_requests")
+        except: pass
     return response
 
 app.middleware("http")(anti_abuse_middleware)
 
+# ----------------------------------------------------------------------------
 def extract_tiktok(url: str):
     res = httpx.get("https://www.tikwm.com/api/", params={"url": url, "hd": 1}, timeout=15.0)
     res_json = res.json()
@@ -84,35 +84,25 @@ def extract_tiktok(url: str):
         "duration": data.get("duration", 0),
         "uploader": data.get("author", {}).get("nickname", "Unknown"), 
         "videos": videos, 
-        "audios": audios
-    }
-
-def extract_youtube(url: str):
-    yt = YouTube(url, client='ANDROID')
-    videos, audios = [], []
-    
-    for stream in yt.streams.filter(type="video", file_extension="mp4", progressive=True):
-        if stream.resolution:
-            height = int(stream.resolution.replace('p', '')) if stream.resolution.replace('p', '').isdigit() else 0
-            videos.append({'quality': stream.resolution, 'height': height, 'size_mb': round((stream.filesize or 0)/(1024*1024), 2), 'url': stream.url})
-            
-    for stream in yt.streams.filter(only_audio=True):
-        audios.append({'format': stream.mime_type.split('/')[-1], 'size_mb': round((stream.filesize or 0)/(1024*1024), 2), 'url': stream.url})
-
-    return {
-        "title": yt.title.replace('/', '_'), 
-        "thumbnail": yt.thumbnail_url, 
-        "duration": yt.length, 
-        "uploader": yt.author,
-        "videos": sorted(videos, key=lambda k: k['height'], reverse=True), 
-        "audios": audios
+        "audios": audios,
+        "best_direct_url": play_url # تخزين الرابط المباشر
     }
 
 def extract_others(url: str):
-    ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 'http_headers': {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}}
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'cookiefile': 'cookies.txt',  # 🔥 مهم جداً
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         videos, audios = [], []
+        
+        # استخراج القوائم بشكل نظيف
         for f in info.get('formats', []):
             filesize = round((f.get('filesize') or 0) / (1024 * 1024), 2)
             if f.get('vcodec') != 'none' and f.get('ext') == 'mp4' and f.get('url') and "m3u8" not in f.get('url'):
@@ -121,37 +111,63 @@ def extract_others(url: str):
                 audios.append({'format': f.get('ext'), 'size_mb': filesize, 'url': f.get('url')})
 
         unique_videos = list({v['height']: v for v in sorted(videos, key=lambda k: k['height'], reverse=True)}.values())
+        
+        # 🔥 الحل الصحيح لجلب أفضل رابط فيديو مباشر MP4 (يحتوي على صوت وصورة)
+        formats = info.get("formats", [])
+        video_url = None
+        for f in formats:
+            if f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                video_url = f.get("url")
+                break
+
+        if not video_url:
+            video_url = info.get("url") # Fallback نهائي
+
+        if not video_url:
+            raise Exception("لم يتم العثور على فيديو صالح")
+
         return {
             "title": info.get('title', 'Video').replace('/', '_'), 
             "thumbnail": info.get('thumbnail', ''), 
             "duration": info.get('duration', 0),
             "uploader": info.get('uploader', 'Unknown'), 
             "videos": unique_videos, 
-            "audios": audios
+            "audios": audios,
+            "best_direct_url": video_url, # تخزين الرابط المباشر لمنع إعادة التحليل
+            "headers": info.get('http_headers', {})
         }
 
+# ----------------------------------------------------------------------------
 async def process_queue_worker(job_id: str, url: str):
     try:
         await redis_client.set(f"job:{job_id}:status", "processing")
         platform, cache_ttl = detect_platform(url)
         
+        data = None
         if platform == "tiktok":
-            result_data = await asyncio.to_thread(extract_tiktok, url)
+            try:
+                data = await asyncio.to_thread(extract_tiktok, url)
+            except Exception as e:
+                logger.warning(f"TikTok API failed, fallback to yt-dlp: {e}")
+                data = await asyncio.to_thread(extract_others, url)
         elif platform == "youtube":
-            result_data = await asyncio.to_thread(extract_youtube, url)
+            data = await asyncio.to_thread(extract_others, url) # yt-dlp هو الأساس القوي
         else:
-            result_data = await asyncio.to_thread(extract_others, url)
+            data = await asyncio.to_thread(extract_others, url)
 
-        if not result_data.get("videos") and not result_data.get("audios"):
+        if not data or (not data.get("videos") and not data.get("audios")):
             raise Exception("لم يتم العثور على وسائط، المقطع محمي أو محذوف.")
 
         download_token = str(uuid.uuid4())
-        result_data["download_token"] = download_token
+        data["download_token"] = download_token
         
-        await redis_client.set(f"dl_token:{download_token}", url, ex=3600)
-        await redis_client.set(f"dl_platform:{download_token}", platform, ex=3600)
+        # 🔥 تخزين الرابط المباشر للتحميل السريع بدون إعادة الاستخراج
+        await redis_client.set(f"dl_direct_url:{download_token}", data.get("best_direct_url", ""), ex=3600)
+        await redis_client.set(f"dl_title:{download_token}", data.get("title", "video"), ex=3600)
+        await redis_client.set(f"dl_headers:{download_token}", json.dumps(data.get("headers", {})), ex=3600)
+        
         await redis_client.set(f"job:{job_id}:status", "completed", ex=cache_ttl)
-        await redis_client.set(f"job:{job_id}:data", json.dumps(result_data), ex=cache_ttl)
+        await redis_client.set(f"job:{job_id}:data", json.dumps(data), ex=cache_ttl)
 
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}")
@@ -191,19 +207,27 @@ async def get_video_legacy(request: Request, url: str = None):
     try:
         platform, _ = detect_platform(url)
         
+        data = None
         if platform == "tiktok":
-            data = await asyncio.to_thread(extract_tiktok, url)
+            try:
+                data = await asyncio.to_thread(extract_tiktok, url)
+            except Exception as e:
+                logger.warning(f"TikTok fallback in legacy API: {e}")
+                data = await asyncio.to_thread(extract_others, url)
         elif platform == "youtube":
-            data = await asyncio.to_thread(extract_youtube, url)
+            data = await asyncio.to_thread(extract_others, url)
         else:
             data = await asyncio.to_thread(extract_others, url)
 
-        if not data.get("videos") and not data.get("audios"):
+        if not data or (not data.get("videos") and not data.get("audios")):
             return JSONResponse({"success": False, "error": "المقطع محمي أو غير متوفر."}, status_code=404)
 
         download_token = str(uuid.uuid4())
-        await redis_client.set(f"dl_token:{download_token}", url, ex=3600)
-        await redis_client.set(f"dl_platform:{download_token}", platform, ex=3600)
+        
+        # 🔥 تخزين الرابط المباشر للتحميل السريع
+        await redis_client.set(f"dl_direct_url:{download_token}", data.get("best_direct_url", ""), ex=3600)
+        await redis_client.set(f"dl_title:{download_token}", data.get("title", "video"), ex=3600)
+        await redis_client.set(f"dl_headers:{download_token}", json.dumps(data.get("headers", {})), ex=3600)
 
         return {
             "success": True,
@@ -215,38 +239,28 @@ async def get_video_legacy(request: Request, url: str = None):
         logger.error(f"Extraction Error: {e}")
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
+# ============================================================================
+# 🔥 نقطة التحميل (سريعة جداً - بدون إعادة استخراج) 🔥
+# ============================================================================
 @app.get("/api/download")
 @limiter.limit("10/minute")
 async def download_secure(request: Request, token: str, range: Optional[str] = Header(None)):
-    url = await redis_client.get(f"dl_token:{token}")
-    platform = await redis_client.get(f"dl_platform:{token}")
-    if not url: return JSONResponse({"success": False, "error": "انتهت صلاحية الجلسة"}, status_code=403)
+    video_url = await redis_client.get(f"dl_direct_url:{token}")
+    if not video_url: return JSONResponse({"success": False, "error": "انتهت صلاحية الجلسة أو الرابط غير صالح"}, status_code=403)
 
-    headers = {}
+    title = await redis_client.get(f"dl_title:{token}") or "video"
+    saved_headers = await redis_client.get(f"dl_headers:{token}")
+    
+    headers = json.loads(saved_headers) if saved_headers else {}
+    if range: headers['Range'] = range
+
     try:
-        if platform == "tiktok":
-            res = await asyncio.to_thread(lambda: httpx.get("https://www.tikwm.com/api/", params={"url": url, "hd": 1}).json())
-            video_url = res.get("data", {}).get("hdplay") or res.get("data", {}).get("play")
-            title = res.get("data", {}).get("title", "tiktok_video").replace('/', '_')
-        elif platform == "youtube":
-            yt = await asyncio.to_thread(lambda: YouTube(url, client='ANDROID'))
-            stream = yt.streams.filter(type="video", file_extension="mp4", progressive=True).get_highest_resolution()
-            video_url, title = stream.url, yt.title.replace('/', '_')
-        else:
-            ydl_opts = {'quiet': True, 'format': 'best'}
-            info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
-            video_url, title = info.get('url'), info.get('title', 'video').replace('/', '_')
-            headers.update(info.get('http_headers', {}))
-
-        if not video_url: raise HTTPException(status_code=404, detail="فشل توليد الرابط.")
-        if range: headers['Range'] = range
-            
         client = httpx.AsyncClient(timeout=45.0, follow_redirects=True)
         req = await client.get(video_url, headers=headers)
         
         if req.status_code not in [200, 206]:
             await req.aclose()
-            return JSONResponse({"success": False, "error": "المصدر رفض الطلب."}, status_code=400)
+            return JSONResponse({"success": False, "error": f"المصدر رفض الطلب بالكود {req.status_code}"}, status_code=400)
 
         response_headers = {
             'Content-Disposition': f'attachment; filename="{title}.mp4"',
