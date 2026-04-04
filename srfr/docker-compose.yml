@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: social-downloader-pro
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./templates:/app/templates
+      - ./downloads:/app/downloads
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
